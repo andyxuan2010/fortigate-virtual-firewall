@@ -1,0 +1,18 @@
+{
+  "python.envFile": "${workspaceFolder}/.env",
+  "python.terminal.activateEnvInCurrentTerminal": true,
+  "python.terminal.activateEnvironment": true,
+  "terminal.integrated.profiles.windows": {
+    "PowerShell (Workspace .env)": {
+      "source": "PowerShell",
+      "args": [
+        "-NoExit",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        "${workspaceFolder}\\.vscode\\load-dotenv.ps1"
+      ]
+    }
+  },
+  "terminal.integrated.defaultProfile.windows": "PowerShell (Workspace .env)"
+}
