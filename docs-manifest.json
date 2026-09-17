@@ -1,0 +1,11 @@
+{
+  "documents": [
+    "docs/azure/architecture.md",
+    "docs/azure/reference/operations.md",
+    "docs/repository-structure.md",
+    "docs/azure/runbooks/deployment.md",
+    "docs/azure/runbooks/usage-and-provisioning.md",
+    "README.md"
+  ],
+  "generatedAt": "2026-09-17T00:46:53Z"
+}

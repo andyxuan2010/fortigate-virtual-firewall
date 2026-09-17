@@ -1,0 +1,6 @@
+subscription_id      = "ef8ff35a-8548-485c-be32-204db0340dd1"
+tenant_id            = "b0f3630d-e5de-4172-b492-0cf5cd387a41"
+resource_group_name  = "rg-ccoe-iac-cc-prod"
+storage_account_name = "stccoeiacccprod"
+container_name       = "terraform"
+key                  = "net-virtual-firewall-prod/terraform.tfstate"
