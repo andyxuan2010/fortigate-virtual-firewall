@@ -1,0 +1,25 @@
+exclude: \.pdf$
+
+repos:
+  - repo: local
+    hooks:
+      - id: terraform-fmt-windows
+        name: terraform fmt (windows)
+        entry: powershell -NoProfile -ExecutionPolicy Bypass -Command "terraform fmt -recursive; if ($LASTEXITCODE -ne 0) { Write-Host 'terraform fmt failed on first attempt, retrying once...'; terraform fmt -recursive; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE } }"
+        language: system
+        pass_filenames: false
+        files: \.tf$
+
+      - id: terraform-validate-windows
+        name: terraform validate (windows)
+        entry: powershell -NoProfile -ExecutionPolicy Bypass -Command "$env:TF_PLUGIN_TIMEOUT='300s'; terraform init -backend=false -input=false > $null; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; terraform validate"
+        language: system
+        pass_filenames: false
+        files: \.tf$
+
+  # - repo: https://github.com/pre-commit/pre-commit-hooks
+  #   rev: v4.4.0
+  #   hooks:
+  #     - id: trailing-whitespace
+  #     - id: check-yaml
+  #     - id: detect-private-key
