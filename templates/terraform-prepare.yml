@@ -1,0 +1,115 @@
+parameters:
+  azureSubscription: ''
+  backendAzureSubscription: ''
+  workingDirectory: '$(Pipeline.Workspace)/landingzone'
+
+steps:
+  - checkout: self
+    clean: true
+    persistCredentials: false
+    path: landingzone
+
+  - checkout: tf_tpl
+    clean: true
+    persistCredentials: false
+    path: terraform_templates
+
+  - bash: |
+      set -euo pipefail
+
+      pat="${ADO_RUNNER_PAT:-}"
+      system_token="${SYSTEM_ACCESSTOKEN:-}"
+      if [[ "${pat}" == \$\(* ]]; then pat=""; fi
+      if [[ "${system_token}" == \$\(* ]]; then system_token=""; fi
+
+      git config --global --unset-all http.https://dev.azure.com/.extraheader || true
+      git config --global --unset-all http.https://dev.azure.com/CCOE-Azure/.extraheader || true
+
+      if [ -n "${system_token}" ]; then
+        git config --global http.https://dev.azure.com/.extraheader "AUTHORIZATION: bearer ${system_token}"
+      elif [ -n "${pat}" ]; then
+        auth_header="$(printf 'azdo:%s' "${pat}" | base64 | tr -d '\n')"
+        git config --global http.https://dev.azure.com/.extraheader "AUTHORIZATION: basic ${auth_header}"
+      else
+        echo "Neither ADO_RUNNER_PAT nor System.AccessToken is available" >&2
+        exit 1
+      fi
+
+      git config --global --get-regexp 'http\..*\.extraheader$' >/dev/null
+    displayName: Configure Git auth for Terraform module downloads
+    env:
+      ADO_RUNNER_PAT: $(ADO_RUNNER_PAT)
+      SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+      GIT_CONFIG_GLOBAL: $(RUNNER_JOB_GIT_CONFIG)
+      HOME: $(RUNNER_JOB_HOME)
+
+  - bash: |
+      set -euo pipefail
+      curl -fsSL "https://releases.hashicorp.com/terraform/$(terraformVersion)/terraform_$(terraformVersion)_linux_amd64.zip" -o terraform.zip
+      unzip -o terraform.zip -d "$(Agent.TempDirectory)/terraform"
+      echo "##vso[task.prependpath]$(Agent.TempDirectory)/terraform"
+      "$(Agent.TempDirectory)/terraform/terraform" version
+    displayName: "Install Terraform"
+
+  - task: AzureCLI@2
+    displayName: "Terraform Init"
+    inputs:
+      azureSubscription: ${{ parameters.backendAzureSubscription }}
+      scriptType: bash
+      scriptLocation: inlineScript
+      workingDirectory: ${{ parameters.workingDirectory }}
+      addSpnToEnvironment: true
+      inlineScript: |
+        set -euo pipefail
+        pat="${ADO_RUNNER_PAT:-}"
+        system_token="${SYSTEM_ACCESSTOKEN:-}"
+        if [[ "${pat}" == \$\(* ]]; then pat=""; fi
+        if [[ "${system_token}" == \$\(* ]]; then system_token=""; fi
+
+        git config --global --unset-all http.https://dev.azure.com/.extraheader || true
+        git config --global --unset-all http.https://dev.azure.com/CCOE-Azure/.extraheader || true
+
+        if [ -n "${system_token}" ]; then
+          git config --global http.https://dev.azure.com/.extraheader "AUTHORIZATION: bearer ${system_token}"
+        elif [ -n "${pat}" ]; then
+          auth_header="$(printf 'azdo:%s' "${pat}" | base64 | tr -d '\n')"
+          git config --global http.https://dev.azure.com/.extraheader "AUTHORIZATION: basic ${auth_header}"
+        else
+          echo "Neither ADO_RUNNER_PAT nor System.AccessToken is available" >&2
+          exit 1
+        fi
+
+        export ARM_CLIENT_ID="$servicePrincipalId"
+        export ARM_TENANT_ID="$tenantId"
+        export ARM_SUBSCRIPTION_ID="$(az account show --query id -o tsv)"
+        if [ -n "${servicePrincipalKey:-}" ]; then
+          export ARM_CLIENT_SECRET="$servicePrincipalKey"
+        fi
+        if [ -n "${idToken:-}" ]; then
+          export ARM_USE_OIDC=true
+          export ARM_OIDC_TOKEN="$idToken"
+        fi
+        backend_subscription_id="$(az account show --query id -o tsv)"
+
+        echo "Ensuring backend container '$(backendContainerName)' exists in storage account '$(backendStorageAccountName)'"
+        az storage container create \
+          --name "$(backendContainerName)" \
+          --account-name "$(backendStorageAccountName)" \
+          --auth-mode login \
+          --only-show-errors \
+          --output none
+
+        terraform init \
+          -input=false \
+          -no-color \
+          -backend-config="resource_group_name=$(backendResourceGroupName)" \
+          -backend-config="storage_account_name=$(backendStorageAccountName)" \
+          -backend-config="container_name=$(backendContainerName)" \
+          -backend-config="key=$(Build.Repository.Name)/terraform.tfstate" \
+          -backend-config="subscription_id=$backend_subscription_id" \
+          -backend-config="tenant_id=$ARM_TENANT_ID"
+    env:
+      ADO_RUNNER_PAT: $(ADO_RUNNER_PAT)
+      SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+      GIT_CONFIG_GLOBAL: $(RUNNER_JOB_GIT_CONFIG)
+      HOME: $(RUNNER_JOB_HOME)
