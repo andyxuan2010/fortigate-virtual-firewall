@@ -1,0 +1,115 @@
+name: Publish documentation portal
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "**/*.md"
+      - "**/*.MD"
+      - "**/*.pdf"
+      - "**/*.vsdx"
+      - "index.html"
+      - "docs-manifest.json"
+      - ".nojekyll"
+      - ".github/workflows/pages.yml"
+      - "scripts/generate-docs-manifest.ps1"
+  workflow_dispatch:
+  repository_dispatch:
+    types:
+      - stage-snapshot
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  documentation-portal-gate:
+    name: Documentation Portal Gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      enabled: ${{ steps.gate.outputs.enabled }}
+    steps:
+      - name: Evaluate IS_ORIGIN
+        id: gate
+        shell: bash
+        env:
+          IS_ORIGIN: ${{ vars.IS_ORIGIN }}
+        run: |
+          set -euo pipefail
+
+          if [[ "${IS_ORIGIN,,}" == "true" ]]; then
+            echo "enabled=false" >> "${GITHUB_OUTPUT}"
+            echo "Documentation portal workflow is disabled for the origin repository."
+          else
+            echo "enabled=true" >> "${GITHUB_OUTPUT}"
+            echo "Documentation portal workflow is enabled for the mirror repository."
+          fi
+  publish-documentation:
+    needs: documentation-portal-gate
+    name: Publish Documentation Portal
+    if: needs['documentation-portal-gate'].outputs.enabled == 'true' && github.ref == 'refs/heads/main' && github.repository == 'CCOE-Azure/fortigate-virtual-firewall'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 1
+
+      - name: Generate documentation manifest
+        shell: pwsh
+        run: ./scripts/generate-docs-manifest.ps1
+
+      - name: Publish clean snapshot to public repository
+        env:
+          STAGE_REPOSITORY: ${{ vars.STAGE_REPOSITORY || 'andyxuan2010/fortigate-virtual-firewall' }}
+          STAGE_REPO_TOKEN: ${{ secrets.STAGE_REPO_TOKEN }}
+          SOURCE_BRANCH: ${{ github.ref_name }}
+          SOURCE_SHA: ${{ github.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ -z "${STAGE_REPO_TOKEN}" ]]; then
+            echo "Missing required secret: STAGE_REPO_TOKEN" >&2
+            exit 1
+          fi
+
+          stage_repository="${STAGE_REPOSITORY#https://github.com/}"
+          stage_repository="${stage_repository%.git}"
+          stage_repository="${stage_repository#/}"
+          stage_repository="${stage_repository%/}"
+
+          if [[ -z "${stage_repository}" ]]; then
+            echo "Missing required repository variable: STAGE_REPOSITORY" >&2
+            exit 1
+          fi
+
+          if [[ "${GITHUB_REPOSITORY,,}" == "${stage_repository,,}" ]]; then
+            echo "STAGE_REPOSITORY must be a different public repository from the private source repository." >&2
+            exit 1
+          fi
+
+          workdir="$(mktemp -d)"
+          trap 'rm -rf "${workdir}"' EXIT
+
+          rsync -a \
+            --exclude='.git' \
+            "${GITHUB_WORKSPACE}/" "${workdir}/repo/"
+
+          cd "${workdir}/repo"
+
+          git init
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b "${SOURCE_BRANCH}"
+          git add .
+          git commit -m "Documentation snapshot from ${SOURCE_BRANCH}@${SOURCE_SHA}"
+
+          target_repo="github.com/${stage_repository}"
+          git remote add origin "https://x-access-token:${STAGE_REPO_TOKEN}@${target_repo}.git"
+          git push --force origin "${SOURCE_BRANCH}"
