@@ -1,0 +1,9 @@
+{
+  "generatedAt": "2026-09-16T21:12:17Z",
+  "documents": [
+    "architecture.md",
+    "README.md",
+    "reference/operations.md",
+    "runbooks/deployment.md"
+  ]
+}
