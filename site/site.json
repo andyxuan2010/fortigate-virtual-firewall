@@ -1,0 +1,6 @@
+{
+  "title": "FortiGate Virtual Firewall",
+  "description": "Architecture, runbooks, and module guidance for FortiGate virtual firewall deployments across AWS and Azure.",
+  "eyebrow": "Network security · infrastructure as code",
+  "repository": "https://github.com/CCOE-Azure/fortigate-virtual-firewall"
+}
