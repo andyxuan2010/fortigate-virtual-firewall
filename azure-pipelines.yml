@@ -1,0 +1,359 @@
+parameters:
+  - name: useEnvironmentApprovals
+    type: boolean
+    default: false
+  - name: deploymentEnvironmentName
+    type: string
+    default: '$(ENVIRONMENT)'
+  - name: azureServiceConnection
+    type: string
+    default: 'sc-ccoe-iac-devops-dev'
+
+name: $(Build.Repository.Name)
+
+trigger:
+  batch: true
+  branches:
+    include:
+      - main
+      # - dev
+      # - sbx
+
+pr: none
+
+pool:
+  name: '$(ADO_AGENT_POOL)'
+  vmImage: '$(ADO_AGENT_VM_IMAGE)'
+
+variables:
+  # Shared runner configuration.
+  - group: iac-shared-vars
+
+  # Repository-specific deployment configuration. Azure DevOps resolves
+  # variable groups before runtime macro expansion, so use the repository name
+  # explicitly instead of $(Build.Repository.Name).
+  - group: fortigate-virtual-firewall
+
+  - name: TERRAFORM_BACKEND_FILE
+    value: 'environments/$(ENVIRONMENT)/backend.hcl'
+
+  - name: TERRAFORM_VAR_FILE
+    value: 'environments/$(ENVIRONMENT)/terraform.tfvars'
+
+  - name: selfRepoName
+    value: '$(Build.Repository.Name)'
+
+  - name: selfRepoRoot
+    value: '$(Pipeline.Workspace)/s/$(selfRepoName)'
+
+  - name: terraformRoot
+    value: '$(selfRepoRoot)/platforms/azure'
+
+stages:
+  - stage: Validate
+    displayName: Common Validation
+    jobs:
+      - job: terraform_validate
+        displayName: Terraform Validate
+        steps:
+          - template: templates/shared-runner-hygiene.yml
+            parameters:
+              configureTerraformCache: true
+              runPostJobCleanup: false
+
+          - checkout: self
+            clean: true
+            persistCredentials: false
+            path: s/$(selfRepoName)
+
+          - task: Bash@3
+            displayName: Show pipeline environment
+            inputs:
+              targetType: inline
+              workingDirectory: $(terraformRoot)
+              script: |
+                set -euo pipefail
+
+                for var_name in \
+                  ADO_AGENT_POOL \
+                  ADO_AGENT_VM_IMAGE \
+                  TERRAFORM_VERSION \
+                  ENVIRONMENT \
+                  TERRAFORM_VAR_FILE \
+                  TERRAFORM_BACKEND_FILE \
+                  ENABLE_ADO_APPLY; do
+                  value="${!var_name:-}"
+                  if [[ -z "${value}" || "${value}" == \$\(* ]]; then
+                    echo "Missing required Azure DevOps variable: ${var_name}" >&2
+                    exit 1
+                  fi
+                done
+
+                for required_file in \
+                  "${TERRAFORM_BACKEND_FILE}" \
+                  "${TERRAFORM_VAR_FILE}"; do
+                  if [[ ! -f "${required_file}" ]]; then
+                    echo "Required pipeline input file not found: ${required_file}" >&2
+                    exit 1
+                  fi
+                done
+
+                echo "Repository root: $(selfRepoRoot)"
+                echo "Agent pool: ${ADO_AGENT_POOL}"
+                echo "Agent VM image: ${ADO_AGENT_VM_IMAGE}"
+                echo "Environment: ${ENVIRONMENT}"
+                echo "Azure service connection: ${{ parameters.azureServiceConnection }}"
+                echo "Terraform version: ${TERRAFORM_VERSION}"
+                echo "Terraform backend file: ${TERRAFORM_BACKEND_FILE}"
+                echo "Terraform var file: ${TERRAFORM_VAR_FILE}"
+                echo "Enable ADO apply: ${ENABLE_ADO_APPLY}"
+            env:
+              ADO_AGENT_POOL: $(ADO_AGENT_POOL)
+              ADO_AGENT_VM_IMAGE: $(ADO_AGENT_VM_IMAGE)
+              TERRAFORM_VERSION: $(TERRAFORM_VERSION)
+              ENVIRONMENT: $(ENVIRONMENT)
+              TERRAFORM_VAR_FILE: $(TERRAFORM_VAR_FILE)
+              TERRAFORM_BACKEND_FILE: $(TERRAFORM_BACKEND_FILE)
+              ENABLE_ADO_APPLY: $(ENABLE_ADO_APPLY)
+
+          - task: Bash@3
+            displayName: Install Terraform
+            inputs:
+              targetType: filePath
+              filePath: $(selfRepoRoot)/scripts/azure/install-terraform.sh
+              arguments: $(TERRAFORM_VERSION)
+              workingDirectory: $(terraformRoot)
+
+          - task: Bash@3
+            displayName: Terraform fmt and validate
+            inputs:
+              targetType: filePath
+              filePath: $(selfRepoRoot)/scripts/azure/terraform-validate.sh
+              workingDirectory: $(terraformRoot)
+            env:
+              SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+
+          - template: templates/shared-runner-hygiene.yml
+            parameters:
+              runInitialization: false
+              runPreJobCleanup: false
+              runCachePrep: false
+
+  - stage: Plan
+    displayName: Terraform Plan ($(ENVIRONMENT))
+    dependsOn: Validate
+    condition: succeeded()
+    variables:
+      planArtifactName: 'terraform-plan-$(ENVIRONMENT)'
+      planTextArtifactName: 'terraform-plan-$(ENVIRONMENT)-text'
+      planFilePath: '$(Build.ArtifactStagingDirectory)/terraform.tfplan'
+      planTextPath: '$(Build.ArtifactStagingDirectory)/terraform-plan.txt'
+    jobs:
+      - job: terraform_plan
+        displayName: Terraform Plan ($(ENVIRONMENT))
+        steps:
+          - template: templates/shared-runner-hygiene.yml
+            parameters:
+              configureTerraformCache: true
+              runPostJobCleanup: false
+
+          - checkout: self
+            clean: true
+            persistCredentials: false
+            path: s/$(selfRepoName)
+
+          - task: Bash@3
+            displayName: Install Terraform
+            inputs:
+              targetType: filePath
+              filePath: $(selfRepoRoot)/scripts/azure/install-terraform.sh
+              arguments: $(TERRAFORM_VERSION)
+              workingDirectory: $(terraformRoot)
+
+          - task: Bash@3
+            displayName: Read Terraform backend config
+            inputs:
+              targetType: filePath
+              filePath: $(selfRepoRoot)/scripts/azure/read-backend-config.sh
+              arguments: $(TERRAFORM_BACKEND_FILE)
+              workingDirectory: $(terraformRoot)
+
+          - task: AzureCLI@2
+            displayName: Terraform plan ($(ENVIRONMENT))
+            inputs:
+              azureSubscription: '${{ parameters.azureServiceConnection }}'
+              scriptType: bash
+              scriptLocation: scriptPath
+              scriptPath: $(selfRepoRoot)/scripts/azure/terraform-plan.sh
+              arguments: >-
+                "$(backendSubscriptionId)"
+                "$(backendTenantId)"
+                "$(backendResourceGroupName)"
+                "$(backendStorageAccountName)"
+                "$(backendContainerName)"
+                "$(backendKey)"
+                "$(TERRAFORM_VAR_FILE)"
+                "$(planFilePath)"
+                "$(planTextPath)"
+              workingDirectory: $(terraformRoot)
+              addSpnToEnvironment: true
+            env:
+              SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+              TF_VAR_fortigate_admin_password: $(FORTIGATE_ADMIN_PASSWORD)
+              TF_VAR_fortigate_admin_ssh_public_key: $(FORTIGATE_ADMIN_SSH_PUBLIC_KEY)
+
+          - task: PublishPipelineArtifact@1
+            displayName: Publish plan artifact
+            inputs:
+              targetPath: $(planFilePath)
+              artifact: $(planArtifactName)
+
+          - task: PublishPipelineArtifact@1
+            displayName: Publish plan text
+            inputs:
+              targetPath: $(planTextPath)
+              artifact: $(planTextArtifactName)
+
+          - template: templates/shared-runner-hygiene.yml
+            parameters:
+              runInitialization: false
+              runPreJobCleanup: false
+              runCachePrep: false
+
+  - stage: Apply
+    displayName: Terraform Apply ($(ENVIRONMENT))
+    dependsOn: Plan
+    condition: and(succeeded(), eq(variables['ENABLE_ADO_APPLY'], 'true'))
+    variables:
+      planArtifactName: 'terraform-plan-$(ENVIRONMENT)'
+      downloadedPlanPath: '$(Pipeline.Workspace)/terraform-plan-$(ENVIRONMENT)/terraform.tfplan'
+    jobs:
+      - ${{ if eq(parameters.useEnvironmentApprovals, true) }}:
+          - deployment: terraform_apply
+            displayName: Terraform Apply ($(ENVIRONMENT))
+            environment: ${{ parameters.deploymentEnvironmentName }}
+            strategy:
+              runOnce:
+                deploy:
+                  steps:
+                    - template: templates/shared-runner-hygiene.yml
+                      parameters:
+                        configureTerraformCache: true
+                        runPostJobCleanup: false
+
+                    - checkout: self
+                      clean: true
+                      persistCredentials: false
+                      path: s/$(selfRepoName)
+
+                    - task: Bash@3
+                      displayName: Install Terraform
+                      inputs:
+                        targetType: filePath
+                        filePath: $(selfRepoRoot)/scripts/azure/install-terraform.sh
+                        arguments: $(TERRAFORM_VERSION)
+                        workingDirectory: $(terraformRoot)
+
+                    - task: Bash@3
+                      displayName: Read Terraform backend config
+                      inputs:
+                        targetType: filePath
+                        filePath: $(selfRepoRoot)/scripts/azure/read-backend-config.sh
+                        arguments: $(TERRAFORM_BACKEND_FILE)
+                        workingDirectory: $(terraformRoot)
+
+                    - task: DownloadPipelineArtifact@2
+                      displayName: Download plan artifact
+                      inputs:
+                        buildType: current
+                        artifactName: $(planArtifactName)
+                        targetPath: $(Pipeline.Workspace)/$(planArtifactName)
+
+                    - task: AzureCLI@2
+                      displayName: Terraform apply ($(ENVIRONMENT))
+                      inputs:
+                        azureSubscription: '${{ parameters.azureServiceConnection }}'
+                        scriptType: bash
+                        scriptLocation: scriptPath
+                        scriptPath: $(selfRepoRoot)/scripts/azure/terraform-apply.sh
+                        arguments: >-
+                          "$(backendSubscriptionId)"
+                          "$(backendTenantId)"
+                          "$(backendResourceGroupName)"
+                          "$(backendStorageAccountName)"
+                          "$(backendContainerName)"
+                          "$(backendKey)"
+                          "$(downloadedPlanPath)"
+                        workingDirectory: $(terraformRoot)
+                        addSpnToEnvironment: true
+                      env:
+                        SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+
+                    - template: templates/shared-runner-hygiene.yml
+                      parameters:
+                        runInitialization: false
+                        runPreJobCleanup: false
+                        runCachePrep: false
+
+      - ${{ if ne(parameters.useEnvironmentApprovals, true) }}:
+          - job: terraform_apply
+            displayName: Terraform Apply ($(ENVIRONMENT))
+            steps:
+              - template: templates/shared-runner-hygiene.yml
+                parameters:
+                  configureTerraformCache: true
+                  runPostJobCleanup: false
+
+              - checkout: self
+                clean: true
+                persistCredentials: false
+                path: s/$(selfRepoName)
+
+              - task: Bash@3
+                displayName: Install Terraform
+                inputs:
+                  targetType: filePath
+                  filePath: $(selfRepoRoot)/scripts/azure/install-terraform.sh
+                  arguments: $(TERRAFORM_VERSION)
+                  workingDirectory: $(terraformRoot)
+
+              - task: Bash@3
+                displayName: Read Terraform backend config
+                inputs:
+                  targetType: filePath
+                  filePath: $(selfRepoRoot)/scripts/azure/read-backend-config.sh
+                  arguments: $(TERRAFORM_BACKEND_FILE)
+                  workingDirectory: $(terraformRoot)
+
+              - task: DownloadPipelineArtifact@2
+                displayName: Download plan artifact
+                inputs:
+                  buildType: current
+                  artifactName: $(planArtifactName)
+                  targetPath: $(Pipeline.Workspace)/$(planArtifactName)
+
+              - task: AzureCLI@2
+                displayName: Terraform apply ($(ENVIRONMENT))
+                inputs:
+                  azureSubscription: '${{ parameters.azureServiceConnection }}'
+                  scriptType: bash
+                  scriptLocation: scriptPath
+                  scriptPath: $(selfRepoRoot)/scripts/azure/terraform-apply.sh
+                  arguments: >-
+                    "$(backendSubscriptionId)"
+                    "$(backendTenantId)"
+                    "$(backendResourceGroupName)"
+                    "$(backendStorageAccountName)"
+                    "$(backendContainerName)"
+                    "$(backendKey)"
+                    "$(downloadedPlanPath)"
+                  workingDirectory: $(terraformRoot)
+                  addSpnToEnvironment: true
+                env:
+                  SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+
+              - template: templates/shared-runner-hygiene.yml
+                parameters:
+                  runInitialization: false
+                  runPreJobCleanup: false
+                  runCachePrep: false

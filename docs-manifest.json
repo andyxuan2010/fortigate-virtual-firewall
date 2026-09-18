@@ -1,0 +1,14 @@
+{
+  "documents": [
+    "docs/aws/architecture.md",
+    "docs/aws/reference/module-gap-analysis.md",
+    "docs/aws/runbooks/usage-and-provisioning.md",
+    "docs/azure/architecture.md",
+    "docs/azure/reference/operations.md",
+    "docs/azure/runbooks/deployment.md",
+    "docs/azure/runbooks/usage-and-provisioning.md",
+    "docs/repository-structure.md",
+    "README.md"
+  ],
+  "generatedAt": "2026-09-18T02:48:16Z"
+}
